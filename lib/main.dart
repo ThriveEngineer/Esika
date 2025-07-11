@@ -35,28 +35,69 @@ void callbackDispatcher() {
           // Get current location
           loc.LocationData locationData = await location.getLocation();
           
-          // Save to shared preferences
+          // Get SharedPreferences
           SharedPreferences prefs = await SharedPreferences.getInstance();
-          List<String> existingData = prefs.getStringList('location_history') ?? [];
           
-          Map<String, dynamic> newLocationData = {
-            'latitude': locationData.latitude,
-            'longitude': locationData.longitude,
-            'timestamp': DateTime.now().millisecondsSinceEpoch,
-            'accuracy': locationData.accuracy,
-          };
+          // Check if we should record this location (stationary check)
+          double? lastLat = prefs.getDouble('last_bg_lat');
+          double? lastLng = prefs.getDouble('last_bg_lng');
+          int? lastMovementTimestamp = prefs.getInt('last_bg_movement_time');
           
-          existingData.add(jsonEncode(newLocationData));
+          bool shouldRecord = false;
+          bool locationChanged = false;
           
-          // Keep only last 1000 entries to prevent excessive storage
-          if (existingData.length > 1000) {
-            existingData = existingData.sublist(existingData.length - 1000);
+          if (lastLat != null && lastLng != null) {
+            // Calculate distance from last position
+            double distance = _calculateDistanceBackground(
+              lastLat, lastLng, 
+              locationData.latitude!, locationData.longitude!
+            );
+            locationChanged = distance > 50; // 50 meters threshold
+          } else {
+            locationChanged = true; // First location
           }
           
-          await prefs.setStringList('location_history', existingData);
+          if (locationChanged) {
+            // Location changed, update movement time
+            await prefs.setDouble('last_bg_lat', locationData.latitude!);
+            await prefs.setDouble('last_bg_lng', locationData.longitude!);
+            await prefs.setInt('last_bg_movement_time', DateTime.now().millisecondsSinceEpoch);
+          } else {
+            // Location hasn't changed, check if stationary for 2+ minutes
+            if (lastMovementTimestamp != null) {
+              DateTime lastMovement = DateTime.fromMillisecondsSinceEpoch(lastMovementTimestamp);
+              Duration stationaryTime = DateTime.now().difference(lastMovement);
+              if (stationaryTime.inMinutes >= 2) {
+                shouldRecord = true;
+                // Reset movement time to prevent immediate re-recording
+                await prefs.setInt('last_bg_movement_time', DateTime.now().millisecondsSinceEpoch);
+              }
+            }
+          }
           
-          // Update last tracking time
-          await prefs.setInt('last_tracking_time', DateTime.now().millisecondsSinceEpoch);
+          if (shouldRecord) {
+            // Save location to history
+            List<String> existingData = prefs.getStringList('location_history') ?? [];
+            
+            Map<String, dynamic> newLocationData = {
+              'latitude': locationData.latitude,
+              'longitude': locationData.longitude,
+              'timestamp': DateTime.now().millisecondsSinceEpoch,
+              'accuracy': locationData.accuracy,
+            };
+            
+            existingData.add(jsonEncode(newLocationData));
+            
+            // Keep only last 1000 entries to prevent excessive storage
+            if (existingData.length > 1000) {
+              existingData = existingData.sublist(existingData.length - 1000);
+            }
+            
+            await prefs.setStringList('location_history', existingData);
+            
+            // Update last tracking time
+            await prefs.setInt('last_tracking_time', DateTime.now().millisecondsSinceEpoch);
+          }
           
           return Future.value(true);
         } catch (e) {
@@ -67,6 +108,20 @@ void callbackDispatcher() {
         return Future.value(false);
     }
   });
+}
+
+// Helper function for background distance calculation
+double _calculateDistanceBackground(double lat1, double lon1, double lat2, double lon2) {
+  const double earthRadius = 6371000; // Earth's radius in meters
+  double dLat = (lat2 - lat1) * (3.141592653589793 / 180);
+  double dLon = (lon2 - lon1) * (3.141592653589793 / 180);
+  
+  double a = (dLat / 2).abs() * (dLat / 2).abs() +
+      (lat1 * (3.141592653589793 / 180)).abs() * (lat2 * (3.141592653589793 / 180)).abs() *
+      (dLon / 2).abs() * (dLon / 2).abs();
+  
+  double c = 2 * (a.abs() / (1 - a).abs()).abs();
+  return earthRadius * c;
 }
 
 void main() {
@@ -104,6 +159,8 @@ class _LocationHeatMapScreenState extends State<LocationHeatMapScreen> with Widg
   LatLng _currentPosition = LatLng(37.7749, -122.4194);
   SharedPreferences? _prefs;
   DateTime? _lastTrackingTime;
+  LatLng? _lastRecordedPosition;
+  DateTime? _lastMovementTime;
 
   @override
   void initState() {
@@ -244,30 +301,77 @@ class _LocationHeatMapScreenState extends State<LocationHeatMapScreen> with Widg
 
   void _startForegroundTracking() {
     _locationTimer = Timer.periodic(Duration(seconds: 30), (timer) async {
-      await _recordCurrentLocation();
+      await _checkAndRecordLocation();
     });
   }
 
-  Future<void> _recordCurrentLocation() async {
+  Future<void> _checkAndRecordLocation() async {
     try {
       loc.LocationData locationData = await _location.getLocation();
+      LatLng currentLatLng = LatLng(locationData.latitude!, locationData.longitude!);
       
-      Map<String, dynamic> newLocationData = {
-        'latitude': locationData.latitude,
-        'longitude': locationData.longitude,
-        'timestamp': DateTime.now().millisecondsSinceEpoch,
-        'accuracy': locationData.accuracy,
-      };
+      // Check if location has changed significantly (more than ~50 meters)
+      bool locationChanged = false;
+      if (_lastRecordedPosition != null) {
+        double distance = _calculateDistance(
+          _lastRecordedPosition!.latitude,
+          _lastRecordedPosition!.longitude,
+          currentLatLng.latitude,
+          currentLatLng.longitude,
+        );
+        locationChanged = distance > 50; // 50 meters threshold
+      } else {
+        locationChanged = true; // First location
+      }
       
-      setState(() {
-        _locationHistory.add(newLocationData);
-        _updateHeatMap();
-      });
-      
-      await _saveLocationData();
+      if (locationChanged) {
+        // Location changed, update movement time
+        _lastMovementTime = DateTime.now();
+        _lastRecordedPosition = currentLatLng;
+      } else {
+        // Location hasn't changed, check if we've been stationary for 2 minutes
+        if (_lastMovementTime != null) {
+          Duration stationaryTime = DateTime.now().difference(_lastMovementTime!);
+          if (stationaryTime.inMinutes >= 2) {
+            // Been stationary for 2+ minutes, record this location
+            await _recordLocationData(locationData);
+            // Reset movement time to prevent immediate re-recording
+            _lastMovementTime = DateTime.now();
+          }
+        }
+      }
     } catch (e) {
-      print('Error recording location: $e');
+      print('Error checking location: $e');
     }
+  }
+
+  Future<void> _recordLocationData(loc.LocationData locationData) async {
+    Map<String, dynamic> newLocationData = {
+      'latitude': locationData.latitude,
+      'longitude': locationData.longitude,
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+      'accuracy': locationData.accuracy,
+    };
+    
+    setState(() {
+      _locationHistory.add(newLocationData);
+      _updateHeatMap();
+    });
+    
+    await _saveLocationData();
+  }
+
+  double _calculateDistance(double lat1, double lon1, double lat2, double lon2) {
+    const double earthRadius = 6371000; // Earth's radius in meters
+    double dLat = (lat2 - lat1) * (math.pi / 180);
+    double dLon = (lon2 - lon1) * (math.pi / 180);
+    
+    double a = math.sin(dLat / 2) * math.sin(dLat / 2) +
+        math.cos(lat1 * (math.pi / 180)) * math.cos(lat2 * (math.pi / 180)) *
+        math.sin(dLon / 2) * math.sin(dLon / 2);
+    
+    double c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
+    return earthRadius * c;
   }
 
   void _startBackgroundTracking() {
@@ -359,11 +463,16 @@ class _LocationHeatMapScreenState extends State<LocationHeatMapScreen> with Widg
       _locationHistory.clear();
       _heatMapCircles.clear();
       _lastTrackingTime = null;
+      _lastRecordedPosition = null;
+      _lastMovementTime = null;
     });
     
     // Clear saved data
     _prefs?.remove('location_history');
     _prefs?.remove('last_tracking_time');
+    _prefs?.remove('last_bg_lat');
+    _prefs?.remove('last_bg_lng');
+    _prefs?.remove('last_bg_movement_time');
   }
 
   void _centerOnCurrentLocation() async {
@@ -513,7 +622,7 @@ class _LocationHeatMapScreenState extends State<LocationHeatMapScreen> with Widg
             SizedBox(height: 4),
             Text(
               value,
-              style: TextStyle(fontSize: 16, color: const Color.fromARGB(255, 204, 204, 204)),
+              style: TextStyle(fontSize: 16, color: const Color.fromARGB(255, 202, 202, 202)),
               textAlign: TextAlign.center,
             ),
           ],
@@ -554,8 +663,9 @@ class _LocationHeatMapScreenState extends State<LocationHeatMapScreen> with Widg
               SizedBox(height: 10),
               Text('• Data is saved automatically'),
               Text('• Tracks in background when app is closed'),
-              Text('• Location checked every 30 seconds (foreground)'),
-              Text('• Background updates every 15 minutes'),
+              Text('• Only records when stationary for 2+ minutes'),
+              Text('• Foreground: checks every 30 seconds'),
+              Text('• Background: checks every 15 minutes'),
               Text('• Keeps last 1000 location points'),
             ],
           ),
