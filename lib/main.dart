@@ -20,6 +20,13 @@ void callbackDispatcher() {
           // Initialize location service
           loc.Location location = loc.Location();
           
+          // Configure location settings for background
+          await location.changeSettings(
+            accuracy: loc.LocationAccuracy.balanced,
+            interval: 300000, // 5 minutes
+            distanceFilter: 10, // Only update if moved 10 meters
+          );
+          
           // Check if location service is enabled
           bool serviceEnabled = await location.serviceEnabled();
           if (!serviceEnabled) {
@@ -35,93 +42,46 @@ void callbackDispatcher() {
           // Get current location
           loc.LocationData locationData = await location.getLocation();
           
-          // Get SharedPreferences
+          // Save to shared preferences
           SharedPreferences prefs = await SharedPreferences.getInstance();
+          List<String> existingData = prefs.getStringList('location_history') ?? [];
           
-          // Check if we should record this location (stationary check)
-          double? lastLat = prefs.getDouble('last_bg_lat');
-          double? lastLng = prefs.getDouble('last_bg_lng');
-          int? lastMovementTimestamp = prefs.getInt('last_bg_movement_time');
+          Map<String, dynamic> newLocationData = {
+            'latitude': locationData.latitude,
+            'longitude': locationData.longitude,
+            'timestamp': DateTime.now().millisecondsSinceEpoch,
+            'accuracy': locationData.accuracy,
+            'source': 'background',
+          };
           
-          bool shouldRecord = false;
-          bool locationChanged = false;
+          existingData.add(jsonEncode(newLocationData));
           
-          if (lastLat != null && lastLng != null) {
-            // Calculate distance from last position
-            double distance = _calculateDistanceBackground(
-              lastLat, lastLng, 
-              locationData.latitude!, locationData.longitude!
-            );
-            locationChanged = distance > 50; // 50 meters threshold
-          } else {
-            locationChanged = true; // First location
+          // Keep only last 2000 entries for more history
+          if (existingData.length > 2000) {
+            existingData = existingData.sublist(existingData.length - 2000);
           }
           
-          if (locationChanged) {
-            // Location changed, update movement time
-            await prefs.setDouble('last_bg_lat', locationData.latitude!);
-            await prefs.setDouble('last_bg_lng', locationData.longitude!);
-            await prefs.setInt('last_bg_movement_time', DateTime.now().millisecondsSinceEpoch);
-          } else {
-            // Location hasn't changed, check if stationary for 2+ minutes
-            if (lastMovementTimestamp != null) {
-              DateTime lastMovement = DateTime.fromMillisecondsSinceEpoch(lastMovementTimestamp);
-              Duration stationaryTime = DateTime.now().difference(lastMovement);
-              if (stationaryTime.inMinutes >= 2) {
-                shouldRecord = true;
-                // Reset movement time to prevent immediate re-recording
-                await prefs.setInt('last_bg_movement_time', DateTime.now().millisecondsSinceEpoch);
-              }
-            }
-          }
+          await prefs.setStringList('location_history', existingData);
           
-          if (shouldRecord) {
-            // Save location to history
-            List<String> existingData = prefs.getStringList('location_history') ?? [];
-            
-            Map<String, dynamic> newLocationData = {
-              'latitude': locationData.latitude,
-              'longitude': locationData.longitude,
-              'timestamp': DateTime.now().millisecondsSinceEpoch,
-              'accuracy': locationData.accuracy,
-            };
-            
-            existingData.add(jsonEncode(newLocationData));
-            
-            // Keep only last 1000 entries to prevent excessive storage
-            if (existingData.length > 1000) {
-              existingData = existingData.sublist(existingData.length - 1000);
-            }
-            
-            await prefs.setStringList('location_history', existingData);
-            
-            // Update last tracking time
-            await prefs.setInt('last_tracking_time', DateTime.now().millisecondsSinceEpoch);
-          }
+          // Update last tracking time
+          await prefs.setInt('last_tracking_time', DateTime.now().millisecondsSinceEpoch);
+          
+          // Track consecutive successful background updates
+          int consecutiveUpdates = prefs.getInt('consecutive_bg_updates') ?? 0;
+          await prefs.setInt('consecutive_bg_updates', consecutiveUpdates + 1);
           
           return Future.value(true);
         } catch (e) {
           print('Background location tracking error: $e');
+          // Reset consecutive updates on error
+          SharedPreferences prefs = await SharedPreferences.getInstance();
+          await prefs.setInt('consecutive_bg_updates', 0);
           return Future.value(false);
         }
       default:
         return Future.value(false);
     }
   });
-}
-
-// Helper function for background distance calculation
-double _calculateDistanceBackground(double lat1, double lon1, double lat2, double lon2) {
-  const double earthRadius = 6371000; // Earth's radius in meters
-  double dLat = (lat2 - lat1) * (3.141592653589793 / 180);
-  double dLon = (lon2 - lon1) * (3.141592653589793 / 180);
-  
-  double a = (dLat / 2).abs() * (dLat / 2).abs() +
-      (lat1 * (3.141592653589793 / 180)).abs() * (lat2 * (3.141592653589793 / 180)).abs() *
-      (dLon / 2).abs() * (dLon / 2).abs();
-  
-  double c = 2 * (a.abs() / (1 - a).abs()).abs();
-  return earthRadius * c;
 }
 
 void main() {
@@ -134,10 +94,36 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Location Heat Map',
+      title: 'Location Tracker',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        visualDensity: VisualDensity.adaptivePlatformDensity,
+        fontFamily: 'SF Pro Display',
+        scaffoldBackgroundColor: Color(0xFFFBFBFB),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Color(0xFF6366F1),
+          brightness: Brightness.light,
+          surface: Colors.white,
+          onSurface: Color(0xFF1F2937),
+        ),
+        appBarTheme: AppBarTheme(
+          backgroundColor: Color(0xFFFBFBFB),
+          elevation: 0,
+          foregroundColor: Color(0xFF1F2937),
+          centerTitle: true,
+          titleTextStyle: TextStyle(
+            color: Color(0xFF1F2937),
+            fontSize: 18,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        elevatedButtonTheme: ElevatedButtonThemeData(
+          style: ElevatedButton.styleFrom(
+            elevation: 0,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(8),
+            ),
+          ),
+        ),
       ),
       home: LocationHeatMapScreen(),
     );
@@ -159,8 +145,7 @@ class _LocationHeatMapScreenState extends State<LocationHeatMapScreen> with Widg
   LatLng _currentPosition = LatLng(37.7749, -122.4194);
   SharedPreferences? _prefs;
   DateTime? _lastTrackingTime;
-  LatLng? _lastRecordedPosition;
-  DateTime? _lastMovementTime;
+  StreamSubscription<loc.LocationData>? _locationSubscription;
 
   @override
   void initState() {
@@ -173,6 +158,7 @@ class _LocationHeatMapScreenState extends State<LocationHeatMapScreen> with Widg
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _locationTimer?.cancel();
+    _locationSubscription?.cancel();
     if (_isTracking) {
       _stopBackgroundTracking();
     }
@@ -185,22 +171,18 @@ class _LocationHeatMapScreenState extends State<LocationHeatMapScreen> with Widg
     
     switch (state) {
       case AppLifecycleState.paused:
-        // App is going to background
-        if (_isTracking) {
-          _startBackgroundTracking();
-          _locationTimer?.cancel();
-        }
+        print('App paused - continuing location tracking in background');
+        _startBackgroundTracking();
         break;
       case AppLifecycleState.resumed:
-        // App is coming to foreground
-        if (_isTracking) {
-          _stopBackgroundTracking();
-          _startForegroundTracking();
-        }
+        print('App resumed - refreshing data');
         _loadLocationData();
         break;
+      case AppLifecycleState.inactive:
+        print('App inactive - maintaining location tracking');
+        break;
       case AppLifecycleState.detached:
-        // App is being terminated
+        print('App detached - starting background tracking');
         if (_isTracking) {
           _startBackgroundTracking();
         }
@@ -223,9 +205,14 @@ class _LocationHeatMapScreenState extends State<LocationHeatMapScreen> with Widg
   }
 
   Future<void> _initializeLocation() async {
-    // Request location permissions
-    var status = await perm.Permission.location.request();
-    if (status.isGranted) {
+    // Request all necessary permissions including background location
+    var locationStatus = await perm.Permission.location.request();
+    var locationAlwaysStatus = await perm.Permission.locationAlways.request();
+    
+    // Also request notification permission for foreground service
+    await perm.Permission.notification.request();
+    
+    if (locationStatus.isGranted || locationAlwaysStatus.isGranted) {
       bool serviceEnabled = await _location.serviceEnabled();
       if (!serviceEnabled) {
         serviceEnabled = await _location.requestService();
@@ -241,6 +228,16 @@ class _LocationHeatMapScreenState extends State<LocationHeatMapScreen> with Widg
           return;
         }
       }
+
+      // Configure location settings for continuous tracking
+      await _location.changeSettings(
+        accuracy: loc.LocationAccuracy.balanced,
+        interval: 30000, // 30 seconds 
+        distanceFilter: 10, // Update if moved 10 meters
+      );
+
+      // Enable background mode - THIS IS KEY!
+      await _location.enableBackgroundMode(enable: true);
 
       // Get current location
       try {
@@ -297,61 +294,67 @@ class _LocationHeatMapScreenState extends State<LocationHeatMapScreen> with Widg
     _prefs?.setBool('was_tracking', true);
     
     _startForegroundTracking();
+    
+    // Show tracking notification to user
+    _showTrackingInfo();
   }
 
   void _startForegroundTracking() {
-    _locationTimer = Timer.periodic(Duration(seconds: 30), (timer) async {
-      await _checkAndRecordLocation();
+    // Use continuous location stream - this keeps running even when screen is off
+    _locationSubscription = _location.onLocationChanged.listen((loc.LocationData locationData) {
+      if (_isTracking) {
+        _recordLocationData(locationData, 'continuous');
+      }
+    });
+    
+    // Also add a backup timer for extra reliability
+    _locationTimer = Timer.periodic(Duration(seconds: 60), (timer) async {
+      if (_isTracking) {
+        try {
+          loc.LocationData locationData = await _location.getLocation();
+          _recordLocationData(locationData, 'timer_backup');
+        } catch (e) {
+          print('Backup location fetch error: $e');
+        }
+      }
     });
   }
 
-  Future<void> _checkAndRecordLocation() async {
-    try {
-      loc.LocationData locationData = await _location.getLocation();
-      LatLng currentLatLng = LatLng(locationData.latitude!, locationData.longitude!);
-      
-      // Check if location has changed significantly (more than ~50 meters)
-      bool locationChanged = false;
-      if (_lastRecordedPosition != null) {
-        double distance = _calculateDistance(
-          _lastRecordedPosition!.latitude,
-          _lastRecordedPosition!.longitude,
-          currentLatLng.latitude,
-          currentLatLng.longitude,
-        );
-        locationChanged = distance > 50; // 50 meters threshold
-      } else {
-        locationChanged = true; // First location
-      }
-      
-      if (locationChanged) {
-        // Location changed, update movement time
-        _lastMovementTime = DateTime.now();
-        _lastRecordedPosition = currentLatLng;
-      } else {
-        // Location hasn't changed, check if we've been stationary for 2 minutes
-        if (_lastMovementTime != null) {
-          Duration stationaryTime = DateTime.now().difference(_lastMovementTime!);
-          if (stationaryTime.inMinutes >= 2) {
-            // Been stationary for 2+ minutes, record this location
-            await _recordLocationData(locationData);
-            // Reset movement time to prevent immediate re-recording
-            _lastMovementTime = DateTime.now();
-          }
-        }
-      }
-    } catch (e) {
-      print('Error checking location: $e');
-    }
+  void _stopForegroundTracking() {
+    _locationSubscription?.cancel();
+    _locationTimer?.cancel();
   }
 
-  Future<void> _recordLocationData(loc.LocationData locationData) async {
+  Future<void> _recordLocationData(loc.LocationData locationData, String source) async {
+    // Filter out inaccurate readings
+    if (locationData.accuracy != null && locationData.accuracy! > 50) {
+      return; // Skip if accuracy is worse than 50 meters
+    }
+
     Map<String, dynamic> newLocationData = {
       'latitude': locationData.latitude,
       'longitude': locationData.longitude,
       'timestamp': DateTime.now().millisecondsSinceEpoch,
       'accuracy': locationData.accuracy,
+      'source': source,
     };
+    
+    // Check if location is significantly different from last recorded
+    if (_locationHistory.isNotEmpty) {
+      var lastLocation = _locationHistory.last;
+      double distance = _calculateDistance(
+        lastLocation['latitude'], 
+        lastLocation['longitude'],
+        locationData.latitude!, 
+        locationData.longitude!
+      );
+      
+      // Only record if moved more than 10 meters or it's been more than 2 minutes
+      num timeDiff = DateTime.now().millisecondsSinceEpoch - lastLocation['timestamp'];
+      if (distance < 10 && timeDiff < 120000) { // 2 minutes
+        return;
+      }
+    }
     
     setState(() {
       _locationHistory.add(newLocationData);
@@ -359,27 +362,37 @@ class _LocationHeatMapScreenState extends State<LocationHeatMapScreen> with Widg
     });
     
     await _saveLocationData();
+    
+    // Update last tracking time
+    _lastTrackingTime = DateTime.now();
+    await _prefs?.setInt('last_tracking_time', DateTime.now().millisecondsSinceEpoch);
   }
 
   double _calculateDistance(double lat1, double lon1, double lat2, double lon2) {
     const double earthRadius = 6371000; // Earth's radius in meters
-    double dLat = (lat2 - lat1) * (math.pi / 180);
-    double dLon = (lon2 - lon1) * (math.pi / 180);
-    
+    double dLat = _degreesToRadians(lat2 - lat1);
+    double dLon = _degreesToRadians(lon2 - lon1);
     double a = math.sin(dLat / 2) * math.sin(dLat / 2) +
-        math.cos(lat1 * (math.pi / 180)) * math.cos(lat2 * (math.pi / 180)) *
+        math.cos(_degreesToRadians(lat1)) * math.cos(_degreesToRadians(lat2)) *
         math.sin(dLon / 2) * math.sin(dLon / 2);
-    
     double c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
     return earthRadius * c;
   }
 
+  double _degreesToRadians(double degrees) {
+    return degrees * (math.pi / 180);
+  }
+
   void _startBackgroundTracking() {
-    // Register periodic background task
+    // Cancel existing tasks first
+    Workmanager().cancelAll();
+    
+    // Register periodic background task with more frequent updates
     Workmanager().registerPeriodicTask(
       "locationTrackingTask",
       "locationTracking",
-      frequency: Duration(minutes: 15), // Minimum frequency for iOS/Android
+      frequency: Duration(minutes: 15), // Minimum allowed by system
+      initialDelay: Duration(minutes: 1),
       constraints: Constraints(
         networkType: NetworkType.notRequired,
         requiresBatteryNotLow: false,
@@ -387,11 +400,15 @@ class _LocationHeatMapScreenState extends State<LocationHeatMapScreen> with Widg
         requiresDeviceIdle: false,
         requiresStorageNotLow: false,
       ),
+      inputData: {
+        'tracking_enabled': true,
+        'start_time': DateTime.now().millisecondsSinceEpoch,
+      },
     );
   }
 
   void _stopBackgroundTracking() {
-    Workmanager().cancelByUniqueName("locationTrackingTask");
+    Workmanager().cancelAll();
   }
 
   void _stopLocationTracking() {
@@ -402,41 +419,51 @@ class _LocationHeatMapScreenState extends State<LocationHeatMapScreen> with Widg
     // Save tracking state
     _prefs?.setBool('was_tracking', false);
     
-    _locationTimer?.cancel();
+    _stopForegroundTracking();
     _stopBackgroundTracking();
   }
 
   void _updateHeatMap() {
-    Map<String, int> locationCounts = {};
+    Map<String, List<Map<String, dynamic>>> locationGroups = {};
     Set<Circle> circles = {};
 
-    // Count visits to each location (rounded to reduce precision and group nearby locations)
+    // Group locations by proximity (more precise grouping)
     for (Map<String, dynamic> location in _locationHistory) {
       double lat = location['latitude'];
       double lng = location['longitude'];
       
-      // Round to 3 decimal places (~111m precision) to group nearby GPS points
-      String key = '${lat.toStringAsFixed(3)},${lng.toStringAsFixed(3)}';
-      locationCounts[key] = (locationCounts[key] ?? 0) + 1;
+      // Round to 4 decimal places (~11m precision) for better clustering
+      String key = '${lat.toStringAsFixed(4)},${lng.toStringAsFixed(4)}';
+      
+      if (!locationGroups.containsKey(key)) {
+        locationGroups[key] = [];
+      }
+      locationGroups[key]!.add(location);
     }
 
-    // Create heat map circles
-    locationCounts.forEach((key, count) {
+    // Create heat map circles with improved visualization
+    locationGroups.forEach((key, locations) {
       List<String> coords = key.split(',');
       double lat = double.parse(coords[0]);
       double lng = double.parse(coords[1]);
 
-      // Calculate intensity based on visit count (slower progression)
-      double intensity = math.min(count / 25.0, 1.0); // Normalize to 0-1 (requires more visits)
+      int visitCount = locations.length;
+      
+      // Enhanced intensity calculation
+      double intensity = math.min(visitCount / 20.0, 1.0); // Adjusted threshold
       Color circleColor = _getHeatMapColor(intensity);
+      
+      // Variable radius based on visit count
+      double radius = math.max(40, math.min(120, visitCount * 8));
 
       circles.add(Circle(
         circleId: CircleId(key),
         center: LatLng(lat, lng),
-        radius: 100,
-        fillColor: circleColor.withOpacity(0.3),
-        strokeColor: circleColor,
-        strokeWidth: 2,
+        radius: radius,
+        fillColor: circleColor.withOpacity(0.25),
+        strokeColor: circleColor.withOpacity(0.6),
+        strokeWidth: 1,
+        onTap: () => _showLocationDetails(locations, lat, lng),
       ));
     });
 
@@ -446,33 +473,198 @@ class _LocationHeatMapScreenState extends State<LocationHeatMapScreen> with Widg
   }
 
   Color _getHeatMapColor(double intensity) {
-    // More conservative color thresholds - requires more visits to change colors
-    if (intensity < 0.15) {
-      return Colors.blue;
-    } else if (intensity < 0.35) {
-      return Colors.green;
-    } else if (intensity < 0.65) {
-      return Colors.yellow;
+    // Minimalistic color palette
+    if (intensity < 0.2) {
+      return Color(0xFF6366F1); // Indigo
+    } else if (intensity < 0.4) {
+      return Color(0xFF10B981); // Emerald
+    } else if (intensity < 0.6) {
+      return Color(0xFFF59E0B); // Amber
+    } else if (intensity < 0.8) {
+      return Color(0xFFEF4444); // Red
     } else {
-      return Colors.red;
+      return Color(0xFFDC2626); // Dark red
     }
   }
 
+  void _showLocationDetails(List<Map<String, dynamic>> locations, double lat, double lng) {
+    showDialog(
+      context: context,
+      builder: (context) => Dialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Location Details',
+                style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF1F2937),
+                ),
+              ),
+              SizedBox(height: 16),
+              _buildDetailRow('Coordinates', '${lat.toStringAsFixed(4)}, ${lng.toStringAsFixed(4)}'),
+              _buildDetailRow('Total visits', '${locations.length}'),
+              _buildDetailRow('Est. time', '${(locations.length * 5)} minutes'),
+              SizedBox(height: 16),
+              Text(
+                'Recent visits',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                  color: Color(0xFF6B7280),
+                ),
+              ),
+              SizedBox(height: 8),
+              Container(
+                constraints: BoxConstraints(maxHeight: 120),
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: math.min(5, locations.length),
+                  itemBuilder: (context, index) {
+                    var loc = locations[index];
+                    return Padding(
+                      padding: EdgeInsets.only(bottom: 4),
+                      child: Text(
+                        '${_formatTime(DateTime.fromMillisecondsSinceEpoch(loc['timestamp']))}',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Color(0xFF9CA3AF),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+              SizedBox(height: 20),
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: Text(
+                    'Close',
+                    style: TextStyle(
+                      color: Color(0xFF6366F1),
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDetailRow(String label, String value) {
+    return Padding(
+      padding: EdgeInsets.only(bottom: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 80,
+            child: Text(
+              label,
+              style: TextStyle(
+                fontSize: 14,
+                color: Color(0xFF6B7280),
+              ),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+                color: Color(0xFF1F2937),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _clearHeatMap() {
-    setState(() {
-      _locationHistory.clear();
-      _heatMapCircles.clear();
-      _lastTrackingTime = null;
-      _lastRecordedPosition = null;
-      _lastMovementTime = null;
-    });
-    
-    // Clear saved data
-    _prefs?.remove('location_history');
-    _prefs?.remove('last_tracking_time');
-    _prefs?.remove('last_bg_lat');
-    _prefs?.remove('last_bg_lng');
-    _prefs?.remove('last_bg_movement_time');
+    showDialog(
+      context: context,
+      builder: (context) => Dialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Clear all data?',
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF1F2937),
+                ),
+              ),
+              SizedBox(height: 8),
+              Text(
+                'This will remove all location history and cannot be undone.',
+                style: TextStyle(
+                  fontSize: 14,
+                  color: Color(0xFF6B7280),
+                ),
+                textAlign: TextAlign.center,
+              ),
+              SizedBox(height: 20),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextButton(
+                      onPressed: () => Navigator.pop(context),
+                      child: Text(
+                        'Cancel',
+                        style: TextStyle(
+                          color: Color(0xFF6B7280),
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                  ),
+                  SizedBox(width: 12),
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: () {
+                        setState(() {
+                          _locationHistory.clear();
+                          _heatMapCircles.clear();
+                          _lastTrackingTime = null;
+                        });
+                        
+                        // Clear saved data
+                        _prefs?.remove('location_history');
+                        _prefs?.remove('last_tracking_time');
+                        _prefs?.remove('consecutive_bg_updates');
+                        
+                        Navigator.pop(context);
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Color(0xFFEF4444),
+                        foregroundColor: Colors.white,
+                      ),
+                      child: Text('Clear'),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   void _centerOnCurrentLocation() async {
@@ -490,48 +682,226 @@ class _LocationHeatMapScreenState extends State<LocationHeatMapScreen> with Widg
 
   String _getTrackingStatus() {
     if (!_isTracking) return 'Stopped';
+    
     if (_lastTrackingTime != null) {
       Duration difference = DateTime.now().difference(_lastTrackingTime!);
-      if (difference.inMinutes < 5) {
+      if (difference.inMinutes < 2) {
         return 'Active';
-      } else {
+      } else if (difference.inMinutes < 20) {
         return 'Background';
+      } else {
+        return 'Inactive';
       }
     }
-    return 'Active';
+    return 'Starting';
+  }
+
+  void _showTrackingInfo() {
+    showDialog(
+      context: context,
+      builder: (context) => Dialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Tracking Started',
+                style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF1F2937),
+                ),
+              ),
+              SizedBox(height: 16),
+              Text(
+                'Location tracking is now active and will continue in the background.',
+                style: TextStyle(
+                  fontSize: 14,
+                  color: Color(0xFF6B7280),
+                ),
+              ),
+              SizedBox(height: 16),
+              Container(
+                padding: EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Color(0xFFF9FAFB),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Color(0xFFE5E7EB)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'For best results:',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                        color: Color(0xFF1F2937),
+                      ),
+                    ),
+                    SizedBox(height: 8),
+                    Text('• Allow "Always" location permission', style: TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
+                    Text('• Disable battery optimization', style: TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
+                    Text('• Keep app in recent apps', style: TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
+                  ],
+                ),
+              ),
+              SizedBox(height: 20),
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: Text(
+                    'Got it',
+                    style: TextStyle(
+                      color: Color(0xFF6366F1),
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  int _getBackgroundUpdateCount() {
+    return _prefs?.getInt('consecutive_bg_updates') ?? 0;
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text('Location Heat Map'),
-        backgroundColor: const Color.fromARGB(255, 255, 255, 255),
+        title: Text('Location Tracker'),
+        actions: [
+          IconButton(
+            icon: Icon(Icons.help_outline, size: 20),
+            onPressed: () => _showLegend(context),
+          ),
+        ],
       ),
       body: Column(
         children: [
-          // Stats Panel
+          // Clean stats header
           Container(
-            color: Colors.white,
-            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: Column(
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceAround,
-                  children: [
-                    _buildStatCard('Locations Tracked', _locationHistory.length.toString()),
-                    _buildStatCard('Heat Points', _heatMapCircles.length.toString()),
-                    _buildStatCard('Status', _getTrackingStatus()),
-                  ],
+            margin: EdgeInsets.all(16),
+            padding: EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.04),
+                  blurRadius: 8,
+                  offset: Offset(0, 2),
                 ),
-                if (_lastTrackingTime != null)
-                  Padding(
-                    padding: EdgeInsets.only(top: 8),
-                    child: Text(
-                      'Last update: ${_formatTime(_lastTrackingTime!)}',
-                      style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-                    ),
+              ],
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Tracking Status',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                          color: Color(0xFF6B7280),
+                        ),
+                      ),
+                      SizedBox(height: 4),
+                      Row(
+                        children: [
+                          Container(
+                            width: 8,
+                            height: 8,
+                            decoration: BoxDecoration(
+                              color: _isTracking ? Color(0xFF10B981) : Color(0xFF6B7280),
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          SizedBox(width: 8),
+                          Text(
+                            _getTrackingStatus(),
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                              color: Color(0xFF1F2937),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
                   ),
+                ),
+                Container(
+                  height: 40,
+                  width: 1,
+                  color: Color(0xFFE5E7EB),
+                ),
+                SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Data Points',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                          color: Color(0xFF6B7280),
+                        ),
+                      ),
+                      SizedBox(height: 4),
+                      Text(
+                        '${_locationHistory.length}',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                          color: Color(0xFF1F2937),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Container(
+                  height: 40,
+                  width: 1,
+                  color: Color(0xFFE5E7EB),
+                ),
+                SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Heat Points',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                          color: Color(0xFF6B7280),
+                        ),
+                      ),
+                      SizedBox(height: 4),
+                      Text(
+                        '${_heatMapCircles.length}',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                          color: Color(0xFF1F2937),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ],
             ),
           ),
@@ -561,16 +931,22 @@ class _LocationHeatMapScreenState extends State<LocationHeatMapScreen> with Widg
           SizedBox(width: 25),
           ElevatedButton(
             onPressed: () {},
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.white,
+              elevation: 4,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+            ),
             child: SizedBox(
               width: 145,
               height: 59,
               child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                 children: [
                   IconButton(
                     onPressed: _isTracking ? _stopLocationTracking : _startLocationTracking,
                     icon: Icon(
                       _isTracking ? Icons.stop_rounded : Icons.play_arrow_rounded,
-                      color: Colors.black,
+                      color: _isTracking ? Colors.red : Colors.green,
                       size: 30,
                     ),
                   ),
@@ -579,14 +955,14 @@ class _LocationHeatMapScreenState extends State<LocationHeatMapScreen> with Widg
                     icon: Icon(
                       Icons.my_location,
                       size: 28,
-                      color: Colors.black,
+                      color: Colors.blue,
                     ),
                   ),
                   IconButton(
                     onPressed: () => _showLegend(context),
                     icon: Icon(
                       Icons.info_rounded,
-                      color: Colors.black,
+                      color: Colors.grey[700],
                       size: 29,
                     ),
                   ),
@@ -597,8 +973,8 @@ class _LocationHeatMapScreenState extends State<LocationHeatMapScreen> with Widg
           SizedBox(width: 15),
           FloatingActionButton(
             onPressed: _clearHeatMap,
-            child: Icon(Icons.clear_rounded, color: Colors.red, size: 28),
-            backgroundColor: Colors.red[100],
+            child: Icon(Icons.clear_rounded, color: Colors.white, size: 28),
+            backgroundColor: Colors.red,
             heroTag: "clear",
           ),
         ],
@@ -608,7 +984,8 @@ class _LocationHeatMapScreenState extends State<LocationHeatMapScreen> with Widg
 
   Widget _buildStatCard(String title, String value) {
     return Card(
-      color: Colors.black,
+      color: Colors.black87,
+      elevation: 2,
       child: Padding(
         padding: EdgeInsets.all(8),
         child: Column(
@@ -616,13 +993,13 @@ class _LocationHeatMapScreenState extends State<LocationHeatMapScreen> with Widg
           children: [
             Text(
               title,
-              style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white),
+              style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white),
               textAlign: TextAlign.center,
             ),
             SizedBox(height: 4),
             Text(
               value,
-              style: TextStyle(fontSize: 16, color: const Color.fromARGB(255, 202, 202, 202)),
+              style: TextStyle(fontSize: 14, color: Colors.white70),
               textAlign: TextAlign.center,
             ),
           ],
@@ -649,25 +1026,34 @@ class _LocationHeatMapScreenState extends State<LocationHeatMapScreen> with Widg
       context: context,
       builder: (BuildContext context) {
         return AlertDialog(
-          title: Text('Heat Map Legend'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('Heat map colors represent visit frequency:'),
-              SizedBox(height: 10),
-              _buildLegendItem(Colors.blue, 'Low activity (1-4 visits)'),
-              _buildLegendItem(Colors.green, 'Medium activity (5-9 visits)'),
-              _buildLegendItem(Colors.yellow, 'High activity (10-16 visits)'),
-              _buildLegendItem(Colors.red, 'Very high activity (17+ visits)'),
-              SizedBox(height: 10),
-              Text('• Data is saved automatically'),
-              Text('• Tracks in background when app is closed'),
-              Text('• Only records when stationary for 2+ minutes'),
-              Text('• Foreground: checks every 30 seconds'),
-              Text('• Background: checks every 15 minutes'),
-              Text('• Keeps last 1000 location points'),
-            ],
+          title: Text('📍 Enhanced Heat Map Guide'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('🎨 Heat map colors (visit frequency):'),
+                SizedBox(height: 8),
+                _buildLegendItem(Colors.blue, 'Low activity (1-4 visits)'),
+                _buildLegendItem(Colors.green, 'Medium activity (5-8 visits)'),
+                _buildLegendItem(Colors.orange, 'High activity (9-12 visits)'),
+                _buildLegendItem(Colors.deepOrange, 'Very high (13-16 visits)'),
+                _buildLegendItem(Colors.red, 'Extreme activity (17+ visits)'),
+                SizedBox(height: 12),
+                Text('ℹ️ Features:', style: TextStyle(fontWeight: FontWeight.bold)),
+                Text('• Tap circles for location details'),
+                Text('• Automatic data saving'),
+                Text('• Smart duplicate filtering'),
+                Text('• Enhanced background tracking'),
+                Text('• Tracks last 2000 locations'),
+                SizedBox(height: 12),
+                Text('⚠️ Important Limitations:', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.orange[700])),
+                Text('• Cannot track when phone is OFF'),
+                Text('• Background updates limited to 15min'),
+                Text('• Battery optimization may affect tracking'),
+                Text('• iOS has stricter background limits'),
+              ],
+            ),
           ),
           actions: [
             TextButton(
